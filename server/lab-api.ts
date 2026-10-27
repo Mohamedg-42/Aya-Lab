@@ -5,9 +5,13 @@ import { labDataSnapshots, labSessions, labUsers } from "../drizzle/schema";
 import type { Role } from "../shared/lab";
 import { getDb } from "./db";
 
+import { demoAccounts, demoLabData } from "../shared/lab-seed";
+
 const COOKIE = "ayame_lab_session";
 const SESSION_MS = 12 * 60 * 60 * 1000;
 const attempts = new Map<string, { count: number; resetAt: number }>();
+const memorySessions = new Map<string, { user: LabUser; expiresAt: number }>();
+let memorySnapshotPayload = JSON.stringify(demoLabData);
 
 type LabUser = typeof labUsers.$inferSelect;
 const tokenHash = (token: string) => createHash("sha256").update(token).digest("hex");
@@ -25,12 +29,17 @@ function readCookie(req: Request, name: string) {
   }
   return null;
 }
-async function currentAccount(req: Request) {
+async function currentAccount(req: Request): Promise<LabUser | null> {
   const token = readCookie(req, COOKIE);
   if (!token) return null;
+  const hash = tokenHash(token);
   const db = await getDb();
-  if (!db) return null;
-  const [session] = await db.select().from(labSessions).where(eq(labSessions.tokenHash, tokenHash(token))).limit(1);
+  if (!db) {
+    const mem = memorySessions.get(hash);
+    if (!mem || mem.expiresAt < Date.now()) return null;
+    return mem.user;
+  }
+  const [session] = await db.select().from(labSessions).where(eq(labSessions.tokenHash, hash)).limit(1);
   if (!session || session.expiresAt.getTime() < Date.now()) return null;
   const [user] = await db.select().from(labUsers).where(eq(labUsers.id, session.userId)).limit(1);
   return user?.active ? user : null;
@@ -125,7 +134,21 @@ export function registerLabRoutes(app: Express) {
       const password = typeof req.body?.password === "string" ? req.body.password : "";
       if (!username || password.length < 1 || password.length > 200) return sendError(res, 400, "Identifiant ou mot de passe incorrect.");
       const db = await getDb();
-      if (!db) return sendError(res, 503, "La base de données du laboratoire est indisponible.");
+      if (!db) {
+        const demo = demoAccounts.find((a) => a.username.toLowerCase() === username);
+        if (!demo || password !== "Ayame2026!") {
+          const next = prior && prior.resetAt > now ? { count: prior.count + 1, resetAt: prior.resetAt } : { count: 1, resetAt: now + 15 * 60 * 1000 };
+          attempts.set(address, next);
+          return sendError(res, 401, "Identifiant ou mot de passe incorrect.");
+        }
+        attempts.delete(address);
+        const expiresAt = Date.now() + SESSION_MS;
+        const token = randomBytes(32).toString("base64url");
+        const account: LabUser = { id: 1, username: demo.username, role: demo.role, displayName: demo.name, active: true, passwordHash: "", createdAt: new Date() };
+        memorySessions.set(tokenHash(token), { user: account, expiresAt });
+        res.cookie(COOKIE, token, cookieOptions());
+        return res.set("Cache-Control", "no-store").json({ user: publicAccount(account) });
+      }
       const [account] = await db.select().from(labUsers).where(eq(labUsers.username, username)).limit(1);
       if (!account || !account.active || !verifyPassword(password, account.passwordHash)) {
         const next = prior && prior.resetAt > now ? { count: prior.count + 1, resetAt: prior.resetAt } : { count: 1, resetAt: now + 15 * 60 * 1000 };
@@ -158,7 +181,10 @@ export function registerLabRoutes(app: Express) {
     try {
       const token = readCookie(req, COOKIE);
       const db = await getDb();
-      if (token && db) await db.delete(labSessions).where(eq(labSessions.tokenHash, tokenHash(token)));
+      if (token) {
+        memorySessions.delete(tokenHash(token));
+        if (db) await db.delete(labSessions).where(eq(labSessions.tokenHash, tokenHash(token)));
+      }
     } catch { /* Toujours effacer le cookie du navigateur. */ }
     res.clearCookie(COOKIE, { ...cookieOptions(), maxAge: 0 });
     res.status(200).json({ success: true });
@@ -168,7 +194,9 @@ export function registerLabRoutes(app: Express) {
     try {
       if (!await currentAccount(req)) return sendError(res, 401, "Session expirée.");
       const db = await getDb();
-      if (!db) return sendError(res, 503, "La base de données du laboratoire est indisponible.");
+      if (!db) {
+        return res.set("Cache-Control", "no-store").json({ data: JSON.parse(memorySnapshotPayload) });
+      }
       const [snapshot] = await db.select().from(labDataSnapshots).where(eq(labDataSnapshots.id, 1)).limit(1);
       if (!snapshot) return sendError(res, 404, "Les données de démonstration ne sont pas initialisées.");
       res.set("Cache-Control", "no-store").json({ data: JSON.parse(snapshot.payload) });
@@ -189,7 +217,14 @@ export function registerLabRoutes(app: Express) {
       const payload = JSON.stringify(data);
       if (Buffer.byteLength(payload, "utf8") > 2_000_000) return sendError(res, 413, "Le jeu de données dépasse la taille autorisée.");
       const db = await getDb();
-      if (!db) return sendError(res, 503, "La base de données du laboratoire est indisponible.");
+      if (!db) {
+        const existingData = JSON.parse(memorySnapshotPayload);
+        if (!roleAllowsSnapshot(account.role as Role, existingData, data)) {
+          return sendError(res, 403, "Cette action n’est pas autorisée pour votre rôle ou cette transition de bulletin.");
+        }
+        memorySnapshotPayload = payload;
+        return res.set("Cache-Control", "no-store").json({ saved: true });
+      }
       const [existing] = await db.select().from(labDataSnapshots).where(eq(labDataSnapshots.id, 1)).limit(1);
       if (existing && !roleAllowsSnapshot(account.role as Role, JSON.parse(existing.payload), data)) {
         return sendError(res, 403, "Cette action n’est pas autorisée pour votre rôle ou cette transition de bulletin.");
