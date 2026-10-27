@@ -11,7 +11,7 @@ import type {
   Patient, PatientType, Prescriber, Product, Role, ResultValue,
 } from "@shared/lab";
 
-const BRAND_MARK = "/manus-storage/logo-ayalab_ca4e2c23.png";
+const BRAND_MARK = "/lab-mark.svg";
 const STORAGE_KEY = "ayalab-demo-store-v1";
 const SESSION_KEY = "ayalab-demo-user-v1";
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;

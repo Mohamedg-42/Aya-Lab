@@ -1,1 +1,17 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128"><rect width="128" height="128" rx="24" fill="#12345a"/><path d="M34 31h11v55h31v10H34zm61 7v10H77v13h17v10H77v16H66V38z" fill="#fff"/><path d="M47 31h11v55h31v10H47z" fill="#8eb6de" opacity=".95"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <!-- Medical Laboratory Flask -->
+  <path d="M26 10H38" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/>
+  <path d="M28 10V21L15.6 44.4C14 47.4 16.2 51 19.6 51H44.4C47.8 51 50 47.4 48.4 44.4L36 21V10" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  
+  <!-- Liquid Wave Inside -->
+  <path d="M20 42C23 40 27 43 32 41C37 39 41 42 44 41" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round"/>
+  
+  <!-- Medical Cross Badge inside flask -->
+  <path d="M32 26V36M27 31H37" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/>
+  
+  <!-- Diagnostics sparkles / bubbles -->
+  <circle cx="25" cy="46" r="1.8" fill="#ffffff"/>
+  <circle cx="38" cy="45" r="1.5" fill="#ffffff"/>
+  <circle cx="48" cy="16" r="2.5" fill="#ffffff"/>
+  <path d="M48 10V13M48 19V22M42 16H45M51 16H54" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round"/>
+</svg>
