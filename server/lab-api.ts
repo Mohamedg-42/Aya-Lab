@@ -33,16 +33,21 @@ async function currentAccount(req: Request): Promise<LabUser | null> {
   const token = readCookie(req, COOKIE);
   if (!token) return null;
   const hash = tokenHash(token);
-  const db = await getDb();
-  if (!db) {
-    const mem = memorySessions.get(hash);
-    if (!mem || mem.expiresAt < Date.now()) return null;
-    return mem.user;
+  try {
+    const db = await getDb();
+    if (db) {
+      const [session] = await db.select().from(labSessions).where(eq(labSessions.tokenHash, hash)).limit(1);
+      if (session && session.expiresAt.getTime() >= Date.now()) {
+        const [user] = await db.select().from(labUsers).where(eq(labUsers.id, session.userId)).limit(1);
+        if (user?.active) return user;
+      }
+    }
+  } catch (err) {
+    console.warn("[Lab currentAccount] DB error, checking memory sessions:", err);
   }
-  const [session] = await db.select().from(labSessions).where(eq(labSessions.tokenHash, hash)).limit(1);
-  if (!session || session.expiresAt.getTime() < Date.now()) return null;
-  const [user] = await db.select().from(labUsers).where(eq(labUsers.id, session.userId)).limit(1);
-  return user?.active ? user : null;
+  const mem = memorySessions.get(hash);
+  if (!mem || mem.expiresAt < Date.now()) return null;
+  return mem.user;
 }
 function cookieOptions() {
   return { httpOnly: true, secure: true, sameSite: "none" as const, path: "/", maxAge: SESSION_MS };
@@ -122,7 +127,7 @@ type ProductRecord = { id: string; quantity: number; expiresAt: string; [key: st
 type BulletinRecord = { id: string; status: string; results: Record<string, unknown>; analysisIds: string[]; [key: string]: any };
 
 export function registerLabRoutes(app: Express) {
-  app.post("/api/lab/login", async (req, res) => {
+  app.post(["/api/lab/login", "/lab/login"], async (req, res) => {
     try {
       const address = req.ip ?? "unknown";
       const now = Date.now();
@@ -133,14 +138,28 @@ export function registerLabRoutes(app: Express) {
       const username = typeof req.body?.username === "string" ? req.body.username.trim().toLowerCase() : "";
       const password = typeof req.body?.password === "string" ? req.body.password : "";
       if (!username || password.length < 1 || password.length > 200) return sendError(res, 400, "Identifiant ou mot de passe incorrect.");
-      const db = await getDb();
-      if (!db) {
-        const demo = demoAccounts.find((a) => a.username.toLowerCase() === username);
-        if (!demo || password !== "Ayame2026!") {
-          const next = prior && prior.resetAt > now ? { count: prior.count + 1, resetAt: prior.resetAt } : { count: 1, resetAt: now + 15 * 60 * 1000 };
-          attempts.set(address, next);
-          return sendError(res, 401, "Identifiant ou mot de passe incorrect.");
+
+      // Tentative en base de données si configurée
+      try {
+        const db = await getDb();
+        if (db) {
+          const [account] = await db.select().from(labUsers).where(eq(labUsers.username, username)).limit(1);
+          if (account && account.active && verifyPassword(password, account.passwordHash)) {
+            attempts.delete(address);
+            const expiresAt = new Date(Date.now() + SESSION_MS);
+            const token = randomBytes(32).toString("base64url");
+            await db.insert(labSessions).values({ userId: account.id, tokenHash: tokenHash(token), expiresAt });
+            res.cookie(COOKIE, token, cookieOptions());
+            return res.set("Cache-Control", "no-store").json({ user: publicAccount(account) });
+          }
         }
+      } catch (dbError) {
+        console.warn("[Lab auth] DB query failed, falling back to memory/demo store:", dbError);
+      }
+
+      // Fallback démo en mémoire (utilisé sur Vercel sans base distante ou si MySQL hors ligne)
+      const demo = demoAccounts.find((a) => a.username.toLowerCase() === username);
+      if (demo && password === "Ayame2026!") {
         attempts.delete(address);
         const expiresAt = Date.now() + SESSION_MS;
         const token = randomBytes(32).toString("base64url");
@@ -149,25 +168,17 @@ export function registerLabRoutes(app: Express) {
         res.cookie(COOKIE, token, cookieOptions());
         return res.set("Cache-Control", "no-store").json({ user: publicAccount(account) });
       }
-      const [account] = await db.select().from(labUsers).where(eq(labUsers.username, username)).limit(1);
-      if (!account || !account.active || !verifyPassword(password, account.passwordHash)) {
-        const next = prior && prior.resetAt > now ? { count: prior.count + 1, resetAt: prior.resetAt } : { count: 1, resetAt: now + 15 * 60 * 1000 };
-        attempts.set(address, next);
-        return sendError(res, 401, "Identifiant ou mot de passe incorrect.");
-      }
-      attempts.delete(address);
-      const expiresAt = new Date(Date.now() + SESSION_MS);
-      const token = randomBytes(32).toString("base64url");
-      await db.insert(labSessions).values({ userId: account.id, tokenHash: tokenHash(token), expiresAt });
-      res.cookie(COOKIE, token, cookieOptions());
-      res.set("Cache-Control", "no-store").json({ user: publicAccount(account) });
+
+      const next = prior && prior.resetAt > now ? { count: prior.count + 1, resetAt: prior.resetAt } : { count: 1, resetAt: now + 15 * 60 * 1000 };
+      attempts.set(address, next);
+      return sendError(res, 401, "Identifiant ou mot de passe incorrect.");
     } catch (error) {
       console.error("[Lab auth] Login failed:", error instanceof Error ? error.message : "unknown error");
       sendError(res, 503, "Connexion indisponible. Réessayez dans un instant.");
     }
   });
 
-  app.get("/api/lab/me", async (req, res) => {
+  app.get(["/api/lab/me", "/lab/me"], async (req, res) => {
     try {
       const account = await currentAccount(req);
       if (!account) return sendError(res, 401, "Session expirée.");
@@ -177,36 +188,39 @@ export function registerLabRoutes(app: Express) {
     }
   });
 
-  app.post("/api/lab/logout", async (req, res) => {
+  app.post(["/api/lab/logout", "/lab/logout"], async (req, res) => {
     try {
       const token = readCookie(req, COOKIE);
-      const db = await getDb();
       if (token) {
         memorySessions.delete(tokenHash(token));
-        if (db) await db.delete(labSessions).where(eq(labSessions.tokenHash, tokenHash(token)));
+        const db = await getDb().catch(() => null);
+        if (db) await db.delete(labSessions).where(eq(labSessions.tokenHash, tokenHash(token))).catch(() => undefined);
       }
     } catch { /* Toujours effacer le cookie du navigateur. */ }
     res.clearCookie(COOKIE, { ...cookieOptions(), maxAge: 0 });
     res.status(200).json({ success: true });
   });
 
-  app.get("/api/lab/state", async (req, res) => {
+  app.get(["/api/lab/state", "/lab/state"], async (req, res) => {
     try {
       if (!await currentAccount(req)) return sendError(res, 401, "Session expirée.");
-      const db = await getDb();
-      if (!db) {
-        return res.set("Cache-Control", "no-store").json({ data: JSON.parse(memorySnapshotPayload) });
+      try {
+        const db = await getDb();
+        if (db) {
+          const [snapshot] = await db.select().from(labDataSnapshots).where(eq(labDataSnapshots.id, 1)).limit(1);
+          if (snapshot) return res.set("Cache-Control", "no-store").json({ data: JSON.parse(snapshot.payload) });
+        }
+      } catch (err) {
+        console.warn("[Lab state] DB read failed, using memory snapshot:", err);
       }
-      const [snapshot] = await db.select().from(labDataSnapshots).where(eq(labDataSnapshots.id, 1)).limit(1);
-      if (!snapshot) return sendError(res, 404, "Les données de démonstration ne sont pas initialisées.");
-      res.set("Cache-Control", "no-store").json({ data: JSON.parse(snapshot.payload) });
+      return res.set("Cache-Control", "no-store").json({ data: JSON.parse(memorySnapshotPayload) });
     } catch (error) {
       console.error("[Lab state] Read failed:", error instanceof Error ? error.message : "unknown error");
       sendError(res, 503, "Impossible de charger les données du laboratoire.");
     }
   });
 
-  app.put("/api/lab/state", async (req, res) => {
+  app.put(["/api/lab/state", "/lab/state"], async (req, res) => {
     try {
       const account = await currentAccount(req);
       if (!account) return sendError(res, 401, "Session expirée.");
@@ -216,21 +230,25 @@ export function registerLabRoutes(app: Express) {
       }
       const payload = JSON.stringify(data);
       if (Buffer.byteLength(payload, "utf8") > 2_000_000) return sendError(res, 413, "Le jeu de données dépasse la taille autorisée.");
-      const db = await getDb();
-      if (!db) {
-        const existingData = JSON.parse(memorySnapshotPayload);
-        if (!roleAllowsSnapshot(account.role as Role, existingData, data)) {
-          return sendError(res, 403, "Cette action n’est pas autorisée pour votre rôle ou cette transition de bulletin.");
+      try {
+        const db = await getDb();
+        if (db) {
+          const [existing] = await db.select().from(labDataSnapshots).where(eq(labDataSnapshots.id, 1)).limit(1);
+          if (existing && !roleAllowsSnapshot(account.role as Role, JSON.parse(existing.payload), data)) {
+            return sendError(res, 403, "Cette action n’est pas autorisée pour votre rôle ou cette transition de bulletin.");
+          }
+          await db.insert(labDataSnapshots).values({ id: 1, payload }).onDuplicateKeyUpdate({ set: { payload } });
+          return res.set("Cache-Control", "no-store").json({ saved: true });
         }
-        memorySnapshotPayload = payload;
-        return res.set("Cache-Control", "no-store").json({ saved: true });
+      } catch (err) {
+        console.warn("[Lab state] DB save failed, saving to memory snapshot:", err);
       }
-      const [existing] = await db.select().from(labDataSnapshots).where(eq(labDataSnapshots.id, 1)).limit(1);
-      if (existing && !roleAllowsSnapshot(account.role as Role, JSON.parse(existing.payload), data)) {
+      const existingData = JSON.parse(memorySnapshotPayload);
+      if (!roleAllowsSnapshot(account.role as Role, existingData, data)) {
         return sendError(res, 403, "Cette action n’est pas autorisée pour votre rôle ou cette transition de bulletin.");
       }
-      await db.insert(labDataSnapshots).values({ id: 1, payload }).onDuplicateKeyUpdate({ set: { payload } });
-      res.set("Cache-Control", "no-store").json({ saved: true });
+      memorySnapshotPayload = payload;
+      return res.set("Cache-Control", "no-store").json({ saved: true });
     } catch (error) {
       console.error("[Lab state] Save failed:", error instanceof Error ? error.message : "unknown error");
       sendError(res, 503, "Impossible d’enregistrer les données du laboratoire.");

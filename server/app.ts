@@ -16,15 +16,15 @@ export function createExpressApp(): Express {
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
   // Health check
-  app.get("/api/health", (_req, res) => res.json({ status: "ok" }));
+  app.get(["/api/health", "/health"], (_req, res) => res.json({ status: "ok" }));
 
   // Platform config script
-  app.get("/api/platform/config.js", (_req, res) => {
+  app.get(["/api/platform/config.js", "/platform/config.js"], (_req, res) => {
     res.set("Cache-Control", "no-store").type("application/javascript").send(publicPlatformScript());
   });
 
   // Storage / logo fallback
-  app.get("/manus-storage/*", (_req, res) => {
+  app.get(["/manus-storage/*", "/api/manus-storage/*"], (_req, res) => {
     res.type("image/svg+xml").sendFile(path.resolve(process.cwd(), "client/public/lab-mark.svg"));
   });
 
@@ -34,7 +34,7 @@ export function createExpressApp(): Express {
 
   // tRPC API
   app.use(
-    "/api/trpc",
+    ["/api/trpc", "/trpc"],
     createExpressMiddleware({
       router: appRouter,
       createContext,
